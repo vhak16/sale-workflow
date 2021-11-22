@@ -143,8 +143,42 @@ class AutomaticWorkflowJob(models.Model):
         sales = sale_obj.search(sale_done_filter)
         _logger.debug("Sale Orders to done: %s", sales.ids)
         for sale in sales:
-            with savepoint(self.env.cr):
-                self._do_sale_done(sale.with_company(sale.company_id), sale_done_filter)
+            with savepoint(self.env.cr), force_company(self.env, sale.company_id):
+                self._do_sale_done(sale, sale_done_filter)
+
+    def _prepare_dict_account_payment(self, invoice):
+        partner_type = (
+            invoice.type in ("out_invoice", "out_refund") and "customer" or "supplier"
+        )
+        communication = (
+            invoice.name
+            if invoice.type in ("out_invoice", "out_refund")
+            else invoice.reference
+        )
+        return {
+            "invoice_ids": [(6, 0, invoice.ids)],
+            "amount": invoice.amount_residual,
+            "payment_date": fields.Date.context_today(self),
+            "communication": communication,
+            "partner_id": invoice.partner_id.id,
+            "partner_type": partner_type,
+        }
+
+    @api.model
+    def _register_payments(self, payment_filter):
+        invoice_obj = self.env["account.move"]
+        invoices = invoice_obj.search(payment_filter)
+        _logger.debug("Invoices to Register Payment: %s", invoices.ids)
+        for invoice in invoices:
+            self._register_payment_invoice(invoice)
+        return
+
+    def _register_payment_invoice(self, invoice):
+        with savepoint(self.env.cr):
+            payment = self.env["account.payment"].create(
+                self._prepare_dict_account_payment(invoice)
+            )
+            payment.post()
 
     @api.model
     def run_with_workflow(self, sale_workflow):
